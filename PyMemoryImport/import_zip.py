@@ -59,6 +59,9 @@ def import_zip_from_bytes(module_name: str, zip_bytes: bytes) -> types.ModuleTyp
                 current_module = zip_module
                 for part in module_path:
                     current_module = getattr(current_module, part)
+                if script_as_module == "__init__":
+                    exec(script_content, current_module.__dict__, current_module.__dict__)
+                    continue
                 script_module = types.ModuleType(script_as_module)
                 try:
                     exec(script_content, script_module.__dict__, script_module.__dict__)
