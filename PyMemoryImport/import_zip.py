@@ -4,76 +4,84 @@ import re
 import types
 import zipfile
 
-
 __all__ = ["import_zip_from_bytes"]
 
 
-def _get_module_path(file_path: str) -> tuple:
-    return tuple(filter(lambda folder: folder, file_path.replace("\\", "/").split("/")))[1:]
-
-
-def _calculate_deep(file_path: str) -> int:
-    return file_path.replace("\\", "/").count("/")
-
-
-def import_zip_from_bytes(module_name: str, zip_bytes: bytes) -> types.ModuleType:
-    zip_file_handler = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    zip_module = types.ModuleType(module_name)
-    files = []
-    file: zipfile.ZipInfo
-    for file in zip_file_handler.filelist:
-        module_path = _get_module_path(file.filename)
+def import_zip_from_bytes(zip_bytes: bytes,
+                          module_name: str = None,
+                          import_init: bool = False,
+                          import_main: bool = False,
+                          import_tries: int = None,
+                          ignored_files: list = None) -> types.ModuleType:
+    if module_name is None:
+        module_name = "<Module>"
+    zip_handler = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    module = types.ModuleType(module_name)
+    python_scripts = []
+    if ignored_files is None:
+        ignored_files = []
+    for file in zip_handler.filelist:
+        if file.filename in ignored_files:
+            continue
+        module_tree = tuple(filter(lambda folder: folder, file.filename.replace("\\", "/").split("/")))[1:]
         if file.is_dir():
-            if _calculate_deep(file.filename) > 1:
-                current_module = zip_module
-                for part in module_path:
+            if len(module_tree):
+                current_module = module
+                for part in module_tree:
                     if not hasattr(current_module, part):
                         setattr(current_module, part, types.ModuleType(part))
                     current_module = getattr(current_module, part)
-        elif any(file.filename.endswith(extension) for extension in (".py",)):
-            script_as_module: str
-            script_as_module = module_path[-1].split(".")[0]
-            if "." in script_as_module:
-                script_as_module = ""
-            files.append((file.filename, module_path[:-1], script_as_module, 0, None))
-    while files:
-        random.shuffle(files)
-        filename, module_path, script_as_module, tries, script_content = files.pop()
-        if tries < 100:
+        elif file.filename.endswith(".py"):
+            script_name_ = module_tree[-1].split(".")[0]
+            if not re.match(re.compile(r"^[a-zA-Z_]+[a-zA-Z0-9_]*$", re.M), script_name_):
+                script_name_ = ""  # is not a valid module
+            python_scripts.append((file.filename, module_tree[:-1], script_name_, 0, None))
+    if import_tries is None:
+        import_tries = len(python_scripts) ** 2
+    pending_modules = {}
+    while python_scripts:
+        random.shuffle(python_scripts)
+        filename, script_tree, script_name, tries, script_content = python_scripts.pop()
+        if tries < import_tries:
             if script_content is None:
-                script_content = zip_file_handler.read(filename)
-                expression = re.compile(b"^from\s+\.\w+\s+import\s+.*", re.M)
+                script_content = zip_handler.read(filename)
+                expression = re.compile(b"^from\\s+\\.\\w+\\s+import\\s+.*", re.M)
                 imports = re.findall(expression, script_content)
                 if imports:
                     for import_ in imports:
                         new_import = b""
-                        dependency_name = re.search(b"from\s\.\w+", re.sub(b"\s+", b" ", import_)).group()[6:]
-                        expression = re.compile(b"^from\s+\..+\s+import\s+", re.M)
+                        dependency_name = re.search(b"from\\s\\.\\w+", re.sub(b"\\s+", b" ", import_)).group()[6:]
+                        expression = re.compile(b"^from\\s+\\..+\\s+import\\s+", re.M)
                         temp = re.sub(expression, b"", import_).replace(b"\n", b"").replace(b"\r", b"")
-                        values = re.split(b"\s*,\s*", temp)
+                        values = re.split(b"\\s*,\\s*", temp)
                         for value in values:
                             new_import += value + b" = " + dependency_name + b"." + value + b"\r\n"
                         script_content = script_content.replace(import_, new_import)
-                        # print(script_content.decode())
             try:
-                current_module = zip_module
-                for part in module_path:
+                current_module = module
+                for part in script_tree:
                     current_module = getattr(current_module, part)
-                if script_as_module == "__init__":
-                    exec(script_content, current_module.__dict__, current_module.__dict__)
+                if script_name == "__main__":
+                    if import_main:
+                        exec(script_content, current_module.__dict__, current_module.__dict__)
                     continue
-                script_module = types.ModuleType(script_as_module)
+                elif script_name == "__init__":
+                    if import_init:
+                        exec(script_content, current_module.__dict__, current_module.__dict__)
+                    continue
+                if not pending_modules.get(filename):
+                    pending_modules[filename] = types.ModuleType(script_name)
                 try:
-                    exec(script_content, script_module.__dict__, script_module.__dict__)
-                    setattr(current_module, script_as_module, script_module)
-                except Exception as e:
+                    exec(script_content, pending_modules[filename].__dict__, pending_modules[filename].__dict__)
+                    setattr(current_module, script_name, pending_modules[filename])
+                except (NameError, AttributeError):
                     try:
-                        script_module.__dict__.update(current_module.__dict__)
-                        exec(script_content, script_module.__dict__, script_module.__dict__)
-                        setattr(current_module, script_as_module, script_module)
-                    except Exception as e:
+                        pending_modules[filename].__dict__.update(current_module.__dict__)
+                        exec(script_content, pending_modules[filename].__dict__, pending_modules[filename].__dict__)
+                        setattr(current_module, script_name, pending_modules[filename])
+                    except (NameError, AttributeError) as e:
                         raise e
-            except Exception as e:
+            except (NameError, AttributeError):
                 tries += 1
-                files.append((filename, module_path, script_as_module, tries, script_content))
-    return zip_module
+                python_scripts.append((filename, script_tree, script_name, tries, script_content))
+    return module
