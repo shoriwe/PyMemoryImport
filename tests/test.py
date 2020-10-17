@@ -10,7 +10,10 @@ def test_script_module_import():
 
 def test_directory_module_import():
     zip_module_bytes = open("Modules/dir_module.zip", "rb").read()
-    zip_module = PyMemoryImport.import_zip.import_zip_from_bytes("zip_module", zip_module_bytes)
+    zip_module = PyMemoryImport.import_zip.import_zip_from_bytes("zip_module",
+                                                                 zip_module_bytes,
+                                                                 True,
+                                                                 ignored_files=["sub_module_functions"])
     zip_module.hello_init()
     zip_module.hello_from_sub_module_functions()
     zip_module.sub_module.sub_module_functions.hello_from_sub_module_functions()
